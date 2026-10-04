@@ -6,6 +6,21 @@ Todos los créditos del proyecto High Octane original son para **Rinnegatamante*
 
 Este repositorio no incluye ROMs ni datos del juego original. Cada usuario necesita su propia copia del juego siguiendo las instrucciones originales de instalación.
 
+## Instalación
+
+### Windows
+
+1. Descarga y descomprime `CTR-High-Octane-Mod-by-MT10.zip`.
+2. Copia una copia original NTSC-U de Crash Team Racing a `CTR-High-Octane-Mod-by-MT10/assets/` y nómbrala exactamente `ctr-u.bin`.
+3. Las voces en español son opcionales. Extrae las voces de tu propia copia PAL usando el [script oficial de extracción de High Octane](https://github.com/Rinnegatamante/Crash-Team-Racing-High-Octane/raw/refs/heads/vita/tools/extract_pal_voices.py) y coloca la carpeta resultante `pal-voices/` en `CTR-High-Octane-Mod-by-MT10/mods/pal-voices/`.
+
+### PS Vita
+
+1. Instala `CTR Mod.vpk`.
+2. Copia una copia original NTSC-U de Crash Team Racing a `ux0:data/ctr/assets/ctr-u.bin`.
+
+El ZIP incluye la carpeta `assets/` preparada y vacía. No incluye `ctr-u.bin`, ROMs, imágenes del disco ni voces extraídas. Usa tus propias copias del juego.
+
 ---
 
 # Crash Team Racing: High Octane (proyecto original)
