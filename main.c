@@ -1,0 +1,512 @@
+#define _CRT_SECURE_NO_WARNINGS
+#define SDL_MAIN_HANDLED
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#if defined(_WIN32)
+#include <io.h>
+#include "platform/native_win32.h"
+#else
+#include <unistd.h>
+#endif
+
+#include <SDL3/SDL.h>
+#include <SDL3/SDL_main.h>
+#define _EnterCriticalSection(x)
+#define EnterCriticalSection(x)
+#define ExitCriticalSection()
+
+#include "platform/native_assets.h"
+#include "platform/native_log.h"
+#include "platform/native_memory.h"
+#include "platform/native_perf.h"
+#include "platform/native_replay_scheduler.h"
+#include "platform/native_savestate.h"
+#include "platform/native_adhoc.h"
+#include "platform/native_custom_racer.h"
+#include "platform/native_leaderboard.h"
+#include "platform/native_network.h"
+#include "platform/native_user_id.h"
+
+#ifdef __vita__
+#include <vitasdk.h>
+#include <dirent.h>
+int _newlib_heap_size_user = 256 * 1024 * 1024;
+#if 0
+int __real_mkdir(const char *fname, mode_t mode);
+int __wrap_mkdir(const char *fname, mode_t mode) {
+	sceClibPrintf("mkdir %s\n", fname);
+	char patched_fname[256];
+	sprintf(patched_fname, "ux0:data/ctr/%s", fname);
+	return __real_mkdir(patched_fname, mode);
+}
+FILE *__real_fopen(char *fname, char *mode);
+FILE *__wrap_fopen(char *fname, char *mode) {
+	sceClibPrintf("fopen %s\n", fname);
+	char patched_fname[256];
+	sprintf(patched_fname, "ux0:data/ctr/%s", fname);
+	return __real_fopen(patched_fname, mode);
+}
+int __real_unlink(const char *fname);
+int __wrap_unlink(const char *fname) {
+	sceClibPrintf("unlink %s\n", fname);
+	char patched_fname[256];
+	sprintf(patched_fname, "ux0:data/ctr/%s", fname);
+	return __real_unlink(patched_fname);
+}
+DIR *__real_opendir(const char *fname);
+DIR *__wrap_opendir(const char *fname) {
+	sceClibPrintf("opendir %s\n", fname);
+	char patched_fname[256];
+	sprintf(patched_fname, "ux0:data/ctr/%s", fname);
+	return __real_opendir(patched_fname);
+}
+#endif
+#endif
+
+#include <platform.h>
+#include <platform/native_input.h>
+
+int gNativeRelicRaceMode = 0;
+int gNativeRelicRaceResultTier = -1;
+
+#include "game/game_unity.h"
+
+#include "game/zGlobal_RDATA.c"
+#include "game/zGlobal_DATA.c"
+#include "game/zGlobal_SDATA.c"
+
+#undef RECT
+
+#include "platform/native_disc_image.c"
+#include "platform/native_assets.c"
+#include "platform/native_audio.c"
+#include "platform/native_memory.c"
+#include "platform/native_checkpoint.c"
+#include "platform/native_checkpoint_file.c"
+#include "platform/native_cd.c"
+#include "platform/native_custom_racer.c"
+#include "platform/native_gpu_links.c"
+#include "platform/native_gpu.c"
+#include "platform/native_gte_core.c"
+#if !defined(__EMSCRIPTEN__)
+#include "platform/native_glad.c"
+#endif
+#include "platform/native_input.c"
+#include "platform/native_network.c"
+#include "platform/native_pc_account.c"
+#include "platform/native_user_id.c"
+#include "platform/native_discord.c"
+#include "platform/native_leaderboard.c"
+#include "platform/native_adhoc.c"
+#include "platform/native_inline_c.c"
+#include "platform/native_libapi.c"
+#include "platform/native_libetc.c"
+#include "platform/native_libgte.c"
+#include "platform/native_libgpu.c"
+#include "platform/native_libpad.c"
+#include "platform/native_libspu.c"
+#include "platform/native_log.c"
+#include "platform/native_memcard.c"
+#include "platform/native_memcard_adapter.c"
+#include "platform/native_perf.c"
+#include "platform/native_platform.c"
+#include "platform/native_replay_scheduler.c"
+#include "platform/native_renderer.c"
+#include "platform/native_savestate.c"
+#include "platform/native_state.c"
+#include "platform/native_str.c"
+
+#ifndef CC
+#if defined(__GNUC__)
+#if _WIN32
+#ifndef __clang__
+#define CC "MINGW-GCC"
+#else
+#define CC "MINGW-CLANG"
+#endif
+#else
+#ifndef __clang__
+#define CC "GCC"
+#else
+#define CC "CLANG"
+#endif
+#endif
+#elif defined(_MSC_VER)
+#define CC "MSVC"
+#else
+#define CC "Unknown"
+#endif
+#endif
+
+#ifndef CTR_NATIVE_VERSION
+#define CTR_NATIVE_VERSION "0.0.0-dev"
+#endif
+
+#ifndef CTR_NATIVE_BUILD_ID
+#define CTR_NATIVE_BUILD_ID "unknown"
+#endif
+
+static int NativeConsole_ShouldPauseOnError(void)
+{
+#if defined(_WIN32)
+	DWORD consoleProcesses[2];
+	DWORD consoleProcessCount;
+
+	if (GetConsoleWindow() == NULL)
+		return 0;
+
+	consoleProcessCount = GetConsoleProcessList(consoleProcesses, (DWORD)(sizeof(consoleProcesses) / sizeof(consoleProcesses[0])));
+	return (consoleProcessCount == 1) && (consoleProcesses[0] == GetCurrentProcessId());
+#else
+	return 0;
+#endif
+}
+
+#if defined(__vita__)
+static void *NativeConsole_Return(const u32 result)
+#else
+static s32 NativeConsole_Return(const u32 result)
+#endif
+{
+	if ((result != 0) && NativeConsole_ShouldPauseOnError())
+	{
+		fflush(stdout);
+		fflush(stderr);
+		fprintf(stderr, "\n[CTR Native] Press Enter to close this window...");
+		fflush(stderr);
+
+		while (getchar() != '\n' && !feof(stdin))
+		{
+		}
+	}
+
+#if defined(__vita__)
+	return NULL;
+#else
+	return (s32)result;
+#endif
+}
+
+// TODO(aalhendi): just make an argparser?
+static int NativeArg_IsVersion(const char *arg)
+{
+	return (arg != NULL) && ((strcmp(arg, "--version") == 0) || (strcmp(arg, "-v") == 0));
+}
+
+extern s32 s_nativeLanguageChosen; // Flag if language has been selected on first boot
+extern int gNativeMirrorModeEnabled;
+int gNative60FpsEnabled = 0;
+int gNativeForce30Fps = 0;
+int gNativeDefaultCameraFar = 0;
+int gNativeDefaultHudSpeedometer = 0;
+int gNativeAIRacersMode = NATIVE_AI_RACERS_EXTENDED;
+u32 gNativeCheatConfigMask = 0;
+#ifndef __vita__
+int gNativeAntiAliasingEnabled = 1;
+int gNativeDitheringEnabled = 1;
+int gNativeBorderlessEnabled = 0;
+#endif
+int cfg_language = 2; // Default: PAL UK language
+
+static const char *NativeConfig_GetPath(void)
+{
+#ifdef __vita__
+	return "ux0:data/ctr/config.ini";
+#elif defined(__EMSCRIPTEN__)
+	return "/persistent/config.ini";
+#else
+	return "config.ini";
+#endif
+}
+
+struct NativeCheatConfigEntry
+{
+	const char *key;
+	u32 bit;
+};
+
+static const struct NativeCheatConfigEntry s_nativeCheatConfig[] =
+{
+	{"cheat_wumpa", CHEAT_WUMPA},
+	{"cheat_mask", CHEAT_MASK},
+	{"cheat_turbo", CHEAT_TURBO},
+	{"cheat_bombs", CHEAT_BOMBS},
+	{"cheat_invisible", CHEAT_INVISIBLE},
+	{"cheat_engine", CHEAT_ENGINE},
+	{"cheat_icy", CHEAT_ICY},
+	{"cheat_turbopad", CHEAT_TURBOPAD},
+	{"cheat_adv", CHEAT_ADV},
+	{"cheat_turbocount", CHEAT_TURBOCOUNT},
+};
+
+static int NativeConfig_SetCheat(const char *key, int value)
+{
+	for (u32 i = 0; i < (u32)(sizeof(s_nativeCheatConfig) / sizeof(s_nativeCheatConfig[0])); i++)
+	{
+		if (strcmp(key, s_nativeCheatConfig[i].key) == 0)
+		{
+			if (value != 0)
+			{
+				gNativeCheatConfigMask |= s_nativeCheatConfig[i].bit;
+			}
+			else
+			{
+				gNativeCheatConfigMask &= ~s_nativeCheatConfig[i].bit;
+			}
+			return 1;
+		}
+	}
+	return 0;
+}
+
+void load_config(void)
+{
+	char buffer[30];
+	int value;
+	FILE *config = fopen(NativeConfig_GetPath(), "r");
+	if (config)
+	{
+		while (EOF != fscanf(config, "%[^=]=%d\n", buffer, &value))
+		{
+			if (strcmp("language", buffer) == 0)
+			{
+				cfg_language = value;
+				s_nativeLanguageChosen = 1;
+			}
+			else if (strcmp("mirror_mode", buffer) == 0)
+			{
+				gNativeMirrorModeEnabled = (value != 0);
+			}
+			else if (strcmp("60fps", buffer) == 0)
+			{
+				gNative60FpsEnabled = (value != 0);
+			}
+			else if (strcmp("default_camera_far", buffer) == 0)
+			{
+				gNativeDefaultCameraFar = (value != 0);
+			}
+			else if (strcmp("default_hud_speedometer", buffer) == 0)
+			{
+				gNativeDefaultHudSpeedometer = (value != 0);
+			}
+			else if (strcmp("ai_racers", buffer) == 0)
+			{
+				if ((value >= NATIVE_AI_RACERS_RETAIL) && (value < NATIVE_AI_RACERS_MODE_COUNT))
+				{
+					gNativeAIRacersMode = value;
+				}
+			}
+			else if (strcmp("custom_ai_racers", buffer) == 0)
+			{
+				gNativeAIRacersMode = value ? NATIVE_AI_RACERS_EXTENDED_CUSTOM : NATIVE_AI_RACERS_EXTENDED;
+			}
+#ifndef __vita__
+			else if (strcmp("anti_aliasing", buffer) == 0)
+			{
+				gNativeAntiAliasingEnabled = (value != 0);
+			}
+			else if (strcmp("dithering", buffer) == 0)
+			{
+				gNativeDitheringEnabled = (value != 0);
+			}
+			else if (strcmp("borderless", buffer) == 0)
+			{
+				gNativeBorderlessEnabled = (value != 0);
+			}
+#endif
+			else if (NativeConfig_SetCheat(buffer, value))
+			{
+				// Persistent gameplay cheat toggle consumed.
+			}
+			else if (Platform_InputConfigSetBinding(buffer, value))
+			{
+				// Binding override consumed by the native input layer.
+			}
+		}
+		fclose(config);
+	}
+}
+
+void save_config(void)
+{
+	FILE *config = fopen(NativeConfig_GetPath(), "w+");
+	if (config != NULL)
+	{
+		fprintf(config, "%s=%d\n", "language", cfg_language);
+		fprintf(config, "%s=%d\n", "mirror_mode", gNativeMirrorModeEnabled != 0);
+		fprintf(config, "%s=%d\n", "60fps", gNative60FpsEnabled != 0);
+		fprintf(config, "%s=%d\n", "default_camera_far", gNativeDefaultCameraFar != 0);
+		fprintf(config, "%s=%d\n", "default_hud_speedometer", gNativeDefaultHudSpeedometer != 0);
+		fprintf(config, "%s=%d\n", "ai_racers", gNativeAIRacersMode);
+#ifndef __vita__
+		fprintf(config, "%s=%d\n", "anti_aliasing", gNativeAntiAliasingEnabled != 0);
+		fprintf(config, "%s=%d\n", "dithering", gNativeDitheringEnabled != 0);
+		fprintf(config, "%s=%d\n", "borderless", gNativeBorderlessEnabled != 0);
+#endif
+		for (u32 i = 0; i < (u32)(sizeof(s_nativeCheatConfig) / sizeof(s_nativeCheatConfig[0])); i++)
+		{
+			fprintf(config, "%s=%d\n", s_nativeCheatConfig[i].key, (gNativeCheatConfigMask & s_nativeCheatConfig[i].bit) != 0);
+		}
+		for (int device = 0; device < PLATFORM_INPUT_BINDING_DEVICE_COUNT; device++)
+		{
+#ifdef __vita__
+			if (device == PLATFORM_INPUT_BINDING_KBM)
+			{
+				continue;
+			}
+#endif
+			for (int action = 0; action < PLATFORM_INPUT_BIND_ACTION_COUNT; action++)
+			{
+				char key[32];
+				Platform_InputGetBindingConfigKey(action, device, key, sizeof(key));
+				if (key[0] != 0)
+				{
+					fprintf(config, "%s=%d\n", key, Platform_InputGetBinding(action, device));
+				}
+			}
+		}
+		fclose(config);
+#if defined(__EMSCRIPTEN__)
+		NativeMemcard_RequestPersistenceSync();
+#endif
+	}
+}
+
+#ifdef __vita__
+#include <pthread.h>
+void *real_main(void *argv);
+
+int main(int argc, char *argv[])
+{
+	pthread_t t;
+	pthread_attr_t attr;
+	pthread_attr_init(&attr);
+	pthread_attr_setstacksize(&attr, 0x400000);
+	pthread_create(&t, &attr, real_main, NULL);
+
+	return sceKernelExitDeleteThread(0);
+}
+
+void *real_main(void *_argv)
+{
+	scePowerSetArmClockFrequency(444);
+	scePowerSetBusClockFrequency(222);
+	scePowerSetGpuClockFrequency(222);
+	scePowerSetGpuXbarClockFrequency(166);
+	sceAppUtilInit(&(SceAppUtilInitParam){}, &(SceAppUtilBootParam){});
+	SceCommonDialogConfigParam cmnDlgCfgParam;
+	sceCommonDialogConfigParamInit(&cmnDlgCfgParam);
+	sceAppUtilSystemParamGetInt(SCE_SYSTEM_PARAM_ID_LANG, (int *)&cmnDlgCfgParam.language);
+	sceAppUtilSystemParamGetInt(SCE_SYSTEM_PARAM_ID_ENTER_BUTTON, (int *)&cmnDlgCfgParam.enterButtonAssign);
+	sceCommonDialogSetConfigParam(&cmnDlgCfgParam);
+	
+	load_config();
+	sceIoMkdir("ux0:data/ctr/shader_cache", 0777);
+	char **argv = _argv;
+	int argc = 0;
+#else
+int main(int argc, char *argv[])
+{
+#endif
+	for (int argIndex = 1; argIndex < argc; argIndex++)
+	{
+		if (NativeArg_IsVersion(argv[argIndex]))
+		{
+			printf("CTR Native %s (%s)\n", CTR_NATIVE_VERSION, CTR_NATIVE_BUILD_ID);
+			return 0;
+		}
+	}
+
+	printf("[CTR Native] Starting...\n");
+	fflush(stdout);
+
+#ifdef __vita__
+	const char *sdlBasePath = "ux0:data/ctr";
+#else
+	const char *sdlBasePath = SDL_GetBasePath();
+#endif
+	printf("[CTR Native] SDL base path: %s\n", sdlBasePath ? sdlBasePath : "(null)");
+	fflush(stdout);
+
+	if (!NativeAssets_Init(sdlBasePath))
+	{
+		fprintf(stderr, "[CTR Native] Failed to initialize asset paths.\n");
+		return NativeConsole_Return(1);
+	}
+
+	printf("[CTR Native] Version: %s (%s)\n", CTR_NATIVE_VERSION, CTR_NATIVE_BUILD_ID);
+	printf("[CTR Native] Built with: " CC "\n");
+	printf("[CTR Native] Base: %s\n", NativeAssets_GetBaseDir());
+	printf("[CTR Native] Assets: %s\n", NativeAssets_GetAssetDir());
+	fflush(stdout);
+
+	if (chdir(NativeAssets_GetBaseDir()) != 0)
+	{
+		fprintf(stderr, "[CTR Native] Failed to enter base directory: %s\n", NativeAssets_GetBaseDir());
+		return NativeConsole_Return(1);
+	}
+
+#ifndef __vita__
+	load_config();
+#endif
+
+	if (!NativeAssets_Validate())
+	{
+		return NativeConsole_Return(1);
+	}
+
+	NativeCustomRacer_Scan();
+
+#if defined(CTR_INTERNAL)
+	if (NativeReplayScheduler_PrepareReportFromArgs(argc, argv) != 0)
+	{
+		return NativeConsole_Return(1);
+	}
+#endif
+
+#if defined(__vita__)
+	printf("[CTR Native] High Octane widescreen 960x544\n");
+	Platform_Init("Crash Team Racing: High Octane", 960, 544);
+#elif CTR_NATIVE_WIDESCREEN
+	printf("[CTR Native] High Octane widescreen 1280x720\n");
+	Platform_Init("Crash Team Racing: High Octane", 1280, 720);
+#elif defined(USE_16BY9)
+	printf("[CTR Native] Widescreen\n");
+	Platform_Init("Crash Team Racing: High Octane", 1280, 720);
+#else
+	printf("[CTR Native] 4:3\n");
+	Platform_Init("Crash Team Racing: High Octane", 800, 600);
+#endif
+
+#if defined(CTR_INTERNAL)
+	if (NativePerf_ConfigureFromArgs(argc, argv) != 0)
+	{
+		Platform_LogFlush();
+		Platform_Shutdown();
+		return NativeConsole_Return(1);
+	}
+#endif
+
+	Platform_InitScratchpad();
+	Platform_RepairResidentPointers(0);
+
+#if defined(CTR_INTERNAL)
+	if (NativeReplayScheduler_ConfigureFromArgs(argc, argv) != 0)
+	{
+		Platform_LogFlush();
+		Platform_Shutdown();
+		return NativeConsole_Return(1);
+	}
+#else
+	(void)argc;
+	(void)argv;
+#endif
+
+	const int result = CTR_Main();
+
+	Platform_Shutdown();
+	return NativeConsole_Return(result);
+}
